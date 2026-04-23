@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0-android;net10.0-ios;net10.0-maccatalyst</TargetFrameworks>
+    <UseMaui>true</UseMaui>
+    <SingleProject>true</SingleProject>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">15.0</SupportedOSPlatformVersion>
+    <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'maccatalyst'">15.0</SupportedOSPlatformVersion>
+    <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">21.0</SupportedOSPlatformVersion>
+
+    <!-- NuGet metadata -->
+    <PackageId>VitrumMAUI</PackageId>
+    <AssemblyName>VitrumMAUI</AssemblyName>
+    <RootNamespace>Vitrum</RootNamespace>
+    <Version>1.0.7</Version>
+    <Authors>Plixroit</Authors>
+    <Description>GPU-accelerated frosted-glass backdrop blur for .NET MAUI. Uses Android 12+ RenderNode/RenderEffect for zero CPU blur. Drop-in replacement for AcrylicView and Sharpnado.MaterialFrame acrylic.</Description>
+    <PackageTags>maui android blur acrylic glass backdrop frosted vitrum</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/Plixroit/VitrumMAUI</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Plixroit/VitrumMAUI.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <Copyright>Copyright © 2026 Plixroit</Copyright>
+    <PackageReleaseNotes>GPU RenderEffect blur + fix RenderNode cycle crash on nested BlurConsumerView</PackageReleaseNotes>
+    <IsPackable>true</IsPackable>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
