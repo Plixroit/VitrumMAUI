@@ -1,5 +1,7 @@
 using Android.Content;
 using Android.Graphics;
+using Android.OS;
+using Android.Views;
 using Microsoft.Maui.Platform;
 
 namespace Vitrum.Android;
@@ -26,4 +28,12 @@ public class NativeBlurHostView : ContentViewGroup
 
         base.DispatchDraw(canvas);
     }
+
+    /// <summary>
+    /// Draws a child view into an external canvas using <c>ViewGroup.drawChild()</c> —
+    /// Android's internal HW-accelerated path that records live display list references
+    /// for all descendant views rather than going through the public software draw path.
+    /// </summary>
+    public void DrawChildInto(Canvas canvas, global::Android.Views.View child)
+        => DrawChild(canvas, child, SystemClock.UptimeMillis());
 }

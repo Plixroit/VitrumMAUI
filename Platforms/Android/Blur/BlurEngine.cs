@@ -28,7 +28,7 @@ public class BlurEngine
     RenderNode? _blurNode;
     float _lastDensity;
     float _blurRadiusDp = 60f;
-    int _captureBackground = 0; // transparent by default
+    int _captureBackground = 0;
 
     public BlurEngine(NativeBlurHostView host) => _host = host;
 
@@ -47,9 +47,12 @@ public class BlurEngine
     public void SetBlurRadius(float dp)
     {
         _blurRadiusDp = dp;
-        _blurNode = null; // force recreate with new radius
+        _blurNode = null;
         InvalidateConsumers();
     }
+
+    /// <summary>True when at least one live consumer is registered.</summary>
+    public bool HasConsumers => _consumers.Any(w => w.TryGetTarget(out _));
 
     /// <summary>Registers a consumer to receive the blurred texture.</summary>
     public void RegisterConsumer(NativeBlurConsumerView consumer)
@@ -58,6 +61,48 @@ public class BlurEngine
     /// <summary>Unregisters a consumer (called on handler disconnect).</summary>
     public void UnregisterConsumer(NativeBlurConsumerView consumer)
         => _consumers.RemoveAll(w => !w.TryGetTarget(out var v) || v == consumer);
+
+    RenderNode EnsureNode(float density)
+    {
+        if (_blurNode == null || density != _lastDensity)
+        {
+            _lastDensity = density;
+            _blurNode = new RenderNode("vitrum_blur");
+            var sat = new ColorMatrix();
+            sat.SetSaturation(Saturation);
+            _blurNode.SetRenderEffect(
+                RenderEffect.CreateChainEffect(
+                    RenderEffect.CreateBlurEffect(_blurRadiusDp, _blurRadiusDp, Shader.TileMode.Clamp!),
+                    RenderEffect.CreateColorFilterEffect(new ColorMatrixColorFilter(sat))));
+        }
+        return _blurNode;
+    }
+
+    /// <summary>
+    /// Records the host's child content into the blur RenderNode.
+    /// Uses <c>ViewGroup.drawChild()</c> which records live hardware-accelerated
+    /// display list references for all child views — safe to call from
+    /// <see cref="DrawBlurOnto"/> without touching consumer visibility.
+    /// </summary>
+    void CaptureLive(float density)
+    {
+        if (_host.ChildCount == 0) return;
+        var content = _host.GetChildAt(0);
+        if (content == null || content.Width == 0 || content.Height == 0) return;
+
+        int bw = Math.Max(1, (int)(_host.Width / density));
+        int bh = Math.Max(1, (int)(_host.Height / density));
+
+        var node = EnsureNode(density);
+        node.SetPosition(0, 0, bw, bh);
+
+        var rc = node.BeginRecording(bw, bh);
+        rc.Scale(1f / density, 1f / density);
+        if (_captureBackground != 0)
+            rc.DrawColor(new global::Android.Graphics.Color(_captureBackground));
+        _host.DrawChildInto(rc, content);
+        node.EndRecording();
+    }
 
     /// <summary>
     /// Called from <see cref="NativeBlurHostView.DispatchDraw"/> on every frame.
@@ -68,40 +113,13 @@ public class BlurEngine
     {
         if (!hostCanvas.IsHardwareAccelerated) return;
         if (Build.VERSION.SdkInt < BuildVersionCodes.S) return;
-        if (_host.ChildCount == 0) return;
-
-        var content = _host.GetChildAt(0);
-        if (content == null || content.Width == 0 || content.Height == 0) return;
 
         float density = _host.Context!.Resources!.DisplayMetrics!.Density;
 
-        // Node size in dp — screen pixels divided by density
-        int bw = Math.Max(1, (int)(_host.Width / density));
-        int bh = Math.Max(1, (int)(_host.Height / density));
-
-        if (_blurNode == null || density != _lastDensity)
-        {
-            _lastDensity = density;
-            _blurNode = new RenderNode("vitrum_blur");
-            var sat = new ColorMatrix();
-            sat.SetSaturation(Saturation);
-            _blurNode.SetRenderEffect(
-                RenderEffect.CreateChainEffect(
-                    RenderEffect.CreateBlurEffect(_blurRadiusDp, _blurRadiusDp, Shader.TileMode.Decal!),
-                    RenderEffect.CreateColorFilterEffect(new ColorMatrixColorFilter(sat))));
-        }
-
-        _blurNode.SetPosition(0, 0, bw, bh);
-
         SetConsumersVisible(false);
-        var rc = _blurNode.BeginRecording(bw, bh);
-        rc.Scale(1f / density, 1f / density);
-        // Pre-fill with background color before content — produces denser blur base
-        if (_captureBackground != 0)
-            rc.DrawColor(new global::Android.Graphics.Color(_captureBackground));
-        content.Draw(rc);
-        _blurNode.EndRecording();
+        CaptureLive(density);
         SetConsumersVisible(true);
+        InvalidateConsumers();
     }
 
     /// <summary>
@@ -118,23 +136,24 @@ public class BlurEngine
         canvas.Save();
         canvas.ClipRect(0, 0, consWidth, consHeight);
 
-        if (_blurNode != null && Build.VERSION.SdkInt >= BuildVersionCodes.S
-                               && canvas.IsHardwareAccelerated)
+        if (Build.VERSION.SdkInt >= BuildVersionCodes.S && canvas.IsHardwareAccelerated)
         {
             float density = _host.Context!.Resources!.DisplayMetrics!.Density;
 
-            // Step 1: blur at 100% opacity
-            _blurNode.SetAlpha(1f);
-            canvas.Save();
-            canvas.Scale(density, density);
-            canvas.Translate(-(consLeft / density), -(consTop / density));
-            canvas.DrawRenderNode(_blurNode);
-            canvas.Restore();
+            CaptureLive(density);
+
+            if (_blurNode != null)
+            {
+                _blurNode.SetAlpha(1f);
+                canvas.Save();
+                canvas.Scale(density, density);
+                canvas.Translate(-(consLeft / density), -(consTop / density));
+                canvas.DrawRenderNode(_blurNode);
+                canvas.Restore();
+            }
         }
 
-        // Step 2: scrim tint ON TOP — tintColor carries the alpha (e.g. 0xB2 = 70% for #B21C1C25)
         canvas.DrawRect(0, 0, consWidth, consHeight, scrimPaint);
-
         canvas.Restore();
     }
 

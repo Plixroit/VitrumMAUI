@@ -54,19 +54,25 @@ iOS and macOS are intentionally not implemented here. Apple introduced **Liquid 
 BlurHostView (NativeBlurHostView extends ContentViewGroup)
 │
 │  DispatchDraw(canvas):
-│    1. Pre-fill recording canvas with CaptureBackground color
-│    2. Hide all registered BlurConsumerViews (INVISIBLE)
-│    3. Record GetChildAt(0) into a RenderNode
-│       with RenderEffect = blur(60dp) chained with colorFilter(saturation=2x)
-│    4. Show BlurConsumerViews again
-│    5. base.DispatchDraw(canvas) — normal draw pass
+│    1. CaptureChild() — hides consumers, records content via
+│       ViewGroup.drawChild() into blur RenderNode, shows consumers,
+│       then invalidates consumers to drive the render loop
+│    2. base.DispatchDraw(canvas) — normal draw pass
 │
 └─ BlurConsumerView (NativeBlurConsumerView extends ContentViewGroup)
      DispatchDraw(canvas):
-       1. Draw blur RenderNode at 100% opacity (blurred background)
-       2. Draw TintColor rect on top (semi-transparent scrim)
-       3. base.DispatchDraw(canvas) — draws children on top
+       1. Capture live: call host.DrawChildInto(blurNode, content)
+          — uses ViewGroup.drawChild() internally, which records live
+          hardware-accelerated display list references for all child
+          views (same approach as Telegram's ViewGroupPartRenderer)
+       2. Record content into RenderNode with
+          RenderEffect = blur(60dp) chained with colorFilter(saturation=2x)
+       3. Draw blur RenderNode at 100% opacity (blurred background)
+       4. Draw TintColor rect on top (semi-transparent scrim)
+       5. base.DispatchDraw(canvas) — draws children on top
 ```
+
+Capture is driven by the **consumer's** draw cycle, not the host's — this means nested `BlurHostViews` work correctly even when the outer host calls `content.Draw()` via a `RecordingCanvas` (which would otherwise skip inner host captures). Each consumer always captures fresh content on every draw.
 
 The saturation chain (`colorMatrix.setSaturation(2f)`) gives the "glass" look — colours behind the blur pop slightly for a premium frosted effect.
 
@@ -149,11 +155,7 @@ Before capturing, `BlurEngine` sets all registered consumers to `INVISIBLE`. For
 
 `GetChildAt(0)` must return the background content. If the first child is itself a `BlurConsumerView`, the capture creates an immediate cycle.
 
-### Rule 3 — Do not nest BlurHostViews
-
-One `BlurHostView` per visual tree branch. Two hosts in the same tree will fight over the same render pass.
-
-### Rule 4 — BlurConsumerViews inside sibling views are safe
+### Rule 3 — BlurConsumerViews inside sibling views are safe
 
 A consumer can live arbitrarily deep inside a sibling of `BlurHostView`. `FindHostHandler` walks up the MAUI element tree and checks each level's siblings, so nesting depth inside a sibling is irrelevant.
 
@@ -165,6 +167,28 @@ A consumer can live arbitrarily deep inside a sibling of `BlurHostView`. `FindHo
     </vitrum:BlurHostView>
 
     <local:MyCustomBar ... />   <!-- internally contains a BlurConsumerView — safe -->
+</Grid>
+```
+
+### Rule 3b — Nested BlurHostViews are supported
+
+A `BlurHostView` inside another `BlurHostView`'s sibling (e.g. a tab view inside a page that has its own outer host) works correctly. The inner consumer finds its nearest host via `FindHostHandler` and captures independently.
+
+```xml
+<!-- ✅ SUPPORTED — inner host/consumer pair inside a page that is a sibling of the outer host -->
+<Grid>
+    <vitrum:BlurHostView>          <!-- outer host (e.g. MainPage) -->
+        <ContentView x:Name="WalletTab">
+            <Grid>
+                <vitrum:BlurHostView>      <!-- inner host -->
+                    <ScrollView ... />
+                </vitrum:BlurHostView>
+                <vitrum:BlurConsumerView   <!-- inner consumer — finds inner host -->
+                    VerticalOptions="Start" ... />
+            </Grid>
+        </ContentView>
+    </vitrum:BlurHostView>
+    <vitrum:BlurConsumerView ... />        <!-- outer consumer — finds outer host -->
 </Grid>
 ```
 

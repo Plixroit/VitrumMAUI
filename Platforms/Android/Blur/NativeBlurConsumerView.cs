@@ -43,6 +43,7 @@ public class NativeBlurConsumerView : ContentViewGroup
                 Width,
                 Height,
                 _tintColor);
+
         }
 
         base.DispatchDraw(canvas);
