@@ -19,6 +19,7 @@ public static class MauiAppBuilderExtensions
 #if ANDROID
             handlers.AddHandler<BlurHostView, Android.Handlers.BlurHostViewHandler>();
             handlers.AddHandler<BlurConsumerView, Android.Handlers.BlurConsumerViewHandler>();
+            handlers.AddHandler<PillGlassView, Android.Handlers.PillGlassViewHandler>();
 #endif
         });
 

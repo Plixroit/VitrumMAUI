@@ -105,8 +105,9 @@ half4 main(float2 coord) {
     float2 grad = normalize(gradSdRoundedRect(centeredCoord, halfSize, gradRadius) + depthEffect * normalize(centeredCoord));
 
     float2 refractedCoord = coord + d * grad;
-    float dispersionIntensity = chromaticAberration * ((centeredCoord.x * centeredCoord.y) / (halfSize.x * halfSize.y));
-    float2 dispersedCoord = d * grad * dispersionIntensity;
+    // Disperse perpendicular to the nearest edge (SDF gradient direction) so the
+    // rainbow fringe is visible on straight top/bottom edges, not only at corners.
+    float2 dispersedCoord = d * grad * chromaticAberration;
 
     half4 color = half4(0.0);
     half4 red    = content.eval(refractedCoord + dispersedCoord);
@@ -145,6 +146,15 @@ half4 main(float2 coord) {
     int _lensNodeHeight;
     bool _lensShaderDirty;
 
+    // Captured glass surface (lens + tint) shared with pill consumers.
+    RenderNode? _glassLayerNode;
+
+    /// <summary>The fully-composited glass surface recorded each frame. Null until first liquid-glass draw.</summary>
+    public RenderNode? GlassLayerNode => _glassLayerNode;
+
+    /// <summary>The blur engine powering this consumer. Used by pill consumers to access raw/blur nodes.</summary>
+    public BlurEngine? Engine => _engine;
+
     // -----------------------------------------------------------------------
 
     public NativeBlurConsumerView(Context context) : base(context)
@@ -170,6 +180,20 @@ half4 main(float2 coord) {
         Invalidate();
     }
 
+    // Returns the view's visual top-left in window px and its own scale factors.
+    // Uses ScaleX/Y + PivotX/Y rather than canvas.GetMatrix() because HW-accelerated
+    // recording canvases do not reliably expose the composite CTM.
+    (float left, float top, float sx, float sy) VisualOrigin()
+    {
+        int[] loc = new int[2];
+        GetLocationInWindow(loc);
+        float sx = ScaleX, sy = ScaleY;
+        // Pivot is in view-local px; shift layout origin to account for scale around pivot.
+        return (loc[0] + PivotX * (1f - sx),
+                loc[1] + PivotY * (1f - sy),
+                sx, sy);
+    }
+
     protected override void DispatchDraw(Canvas canvas)
     {
         if (_engine != null && _blurEnabled)
@@ -182,15 +206,15 @@ half4 main(float2 coord) {
             }
             else
             {
-                int[] myLoc = new int[2];
-                GetLocationInWindow(myLoc);
+                var (vLeft, vTop, sx, sy) = VisualOrigin();
                 int[] hostLoc = new int[2];
                 _engine.GetHostLocationInWindow(hostLoc);
                 _engine.DrawBlurOnto(canvas,
-                    myLoc[0] - hostLoc[0],
-                    myLoc[1] - hostLoc[1],
+                    (int)(vLeft - hostLoc[0]),
+                    (int)(vTop  - hostLoc[1]),
                     Width, Height,
-                    _tintColor);
+                    _tintColor,
+                    sx, sy);
             }
         }
 
@@ -202,12 +226,11 @@ half4 main(float2 coord) {
     {
         if (Width == 0 || Height == 0) return;
 
-        int[] myLoc = new int[2];
-        GetLocationInWindow(myLoc);
+        var (vLeft, vTop, sx, sy) = VisualOrigin();
         int[] hostLoc = new int[2];
         _engine!.GetHostLocationInWindow(hostLoc);
-        int offsetX = myLoc[0] - hostLoc[0];
-        int offsetY = myLoc[1] - hostLoc[1];
+        int offsetX = (int)(vLeft - hostLoc[0]);
+        int offsetY = (int)(vTop  - hostLoc[1]);
         float density = Context!.Resources!.DisplayMetrics!.Density;
 
         // Capture the background into the blur RenderNode.
@@ -220,22 +243,27 @@ half4 main(float2 coord) {
         // so the shader sees focused edges and can produce visible refraction distortion.
         _lensNode!.SetPosition(0, 0, Width, Height);
         var rc = _lensNode.BeginRecording(Width, Height);
-        _engine.DrawRawNodeOnto(rc, offsetX, offsetY, density);
+        _engine.DrawRawNodeOnto(rc, offsetX, offsetY, density, sx, sy);
         _lensNode.EndRecording();
 
-        canvas.Save();
-        canvas.ClipRect(0, 0, Width, Height);
-        canvas.DrawRenderNode(_lensNode);
-
-        // Draw tint scrim on top of the glass if the consumer has one configured.
+        // Record lens + tint together into _glassLayerNode so pill consumers can sample
+        // this glass surface as their backdrop (glass-within-glass depth effect).
+        _glassLayerNode ??= new RenderNode("vitrum_glass_layer");
+        _glassLayerNode.SetPosition(0, 0, Width, Height);
+        var glassRc = _glassLayerNode.BeginRecording(Width, Height);
+        glassRc.DrawRenderNode(_lensNode);
         int tintAlpha = ((_tintColor >> 24) & 0xFF);
         if (tintAlpha != 0)
         {
             using var tintPaint = new global::Android.Graphics.Paint(PaintFlags.AntiAlias);
             tintPaint.Color = new global::Android.Graphics.Color(_tintColor);
-            canvas.DrawRect(0, 0, Width, Height, tintPaint);
+            glassRc.DrawRect(0, 0, Width, Height, tintPaint);
         }
+        _glassLayerNode.EndRecording();
 
+        canvas.Save();
+        canvas.ClipRect(0, 0, Width, Height);
+        canvas.DrawRenderNode(_glassLayerNode);
         canvas.Restore();
     }
 
@@ -260,7 +288,7 @@ half4 main(float2 coord) {
             _lensShader.SetFloatUniform("refractionHeight", 20f * density);
             _lensShader.SetFloatUniform("refractionAmount", -70f * density);
             _lensShader.SetFloatUniform("depthEffect", 0.3f);
-            _lensShader.SetFloatUniform("chromaticAberration", 0.3f);
+            _lensShader.SetFloatUniform("chromaticAberration", 0.18f);
             _lensShader.SetFloatUniform("contrast", 0f);
             _lensShader.SetFloatUniform("whitePoint", 0.08f);
             _lensShader.SetFloatUniform("chromaMultiplier", 1.2f);

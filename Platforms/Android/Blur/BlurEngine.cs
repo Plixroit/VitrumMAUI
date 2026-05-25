@@ -145,11 +145,14 @@ public class BlurEngine
 
     /// <summary>
     /// Called from <see cref="NativeBlurConsumerView.DispatchDraw"/>.
-    /// Clips the canvas, aligns to host origin, draws the blur node at density scale,
-    /// then draws the tint overlay.
+    /// Clips the canvas, aligns to host origin, draws the blur node, then draws the tint overlay.
+    /// <paramref name="parentScaleX"/> and <paramref name="parentScaleY"/> are the consumer's
+    /// current ScaleX/ScaleY. When non-1, the draw scale is reduced to density/parentScale so
+    /// the texture covers the correct visual area at 1:1 pixels rather than stretching.
     /// </summary>
     public void DrawBlurOnto(Canvas canvas, int consLeft, int consTop,
-                             int consWidth, int consHeight, int tintColor)
+                             int consWidth, int consHeight, int tintColor,
+                             float parentScaleX = 1f, float parentScaleY = 1f)
     {
         using var scrimPaint = new global::Android.Graphics.Paint(PaintFlags.AntiAlias);
         scrimPaint.Color = new global::Android.Graphics.Color(tintColor);
@@ -167,7 +170,9 @@ public class BlurEngine
             {
                 _blurNode.SetAlpha(1f);
                 canvas.Save();
-                canvas.Scale(density, density);
+                // Divide by parentScale so the effective draw scale stays at density regardless
+                // of any scale animation applied to the consumer view.
+                canvas.Scale(density / parentScaleX, density / parentScaleY);
                 canvas.Translate(-(consLeft / density), -(consTop / density));
                 canvas.DrawRenderNode(_blurNode);
                 canvas.Restore();
@@ -197,15 +202,19 @@ public class BlurEngine
 
     /// <summary>
     /// Draws the raw (unblurred) <c>RenderNode</c> into <paramref name="canvas"/> aligned to
-    /// the consumer's screen position. The blur is applied by the lens node's own
-    /// <c>CreateChainEffect</c> so the lens shader receives blur-then-refract ordering.
+    /// the consumer's visual position. Used inside the lens node's recording canvas so the
+    /// lens shader receives blur-then-refract ordering via the lens node's own ChainEffect.
+    /// <paramref name="parentScaleX/Y"/> compensate for the consumer's scale animation: the
+    /// recording is drawn at density/parentScale so that when the lens node is rendered at
+    /// parentScale on screen, the background content fills the visual bounds at 1:1 pixels.
     /// </summary>
     /// <returns><c>false</c> if the raw node has not been captured yet.</returns>
-    public bool DrawRawNodeOnto(Canvas canvas, int consLeft, int consTop, float density)
+    public bool DrawRawNodeOnto(Canvas canvas, int consLeft, int consTop, float density,
+                                float parentScaleX = 1f, float parentScaleY = 1f)
     {
         if (_rawNode == null) return false;
         canvas.Save();
-        canvas.Scale(density, density);
+        canvas.Scale(density / parentScaleX, density / parentScaleY);
         canvas.Translate(-(consLeft / density), -(consTop / density));
         canvas.DrawRenderNode(_rawNode);
         canvas.Restore();
