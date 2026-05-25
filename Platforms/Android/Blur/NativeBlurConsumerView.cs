@@ -167,6 +167,47 @@ half4 main(float2 coord) {
     public void AttachEngine(BlurEngine engine) => _engine = engine;
     public void DetachEngine() => _engine = null;
 
+    // True when the engine was found via the native walk in OnAttachedToWindow
+    // rather than via the MAUI handler ConnectHandler path.
+    bool _engineFromNativeWalk;
+
+    protected override void OnAttachedToWindow()
+    {
+        base.OnAttachedToWindow();
+        if (_engine != null) return;
+
+        // MAUI ConnectHandler fired before this view was in the element tree so
+        // FindHostHandler() returned null. Walk the native Android hierarchy now
+        // that we are guaranteed to be attached: scan ancestors and their siblings
+        // for a NativeBlurHostView, mirroring what FindHostHandler does in MAUI.
+        global::Android.Views.View? current = this;
+        while (current?.Parent is global::Android.Views.ViewGroup parent)
+        {
+            for (int i = 0; i < parent.ChildCount; i++)
+            {
+                if (parent.GetChildAt(i) is NativeBlurHostView host)
+                {
+                    AttachEngine(host.Engine);
+                    host.Engine.RegisterConsumer(this);
+                    _engineFromNativeWalk = true;
+                    return;
+                }
+            }
+            current = parent as global::Android.Views.View;
+        }
+    }
+
+    protected override void OnDetachedFromWindow()
+    {
+        base.OnDetachedFromWindow();
+        if (_engineFromNativeWalk && _engine != null)
+        {
+            _engine.UnregisterConsumer(this);
+            DetachEngine();
+            _engineFromNativeWalk = false;
+        }
+    }
+
     /// <summary>
     /// Enables or disables the liquid glass lens effect.
     /// <paramref name="cornerRadiusPx"/> is the corner radius in physical pixels,
