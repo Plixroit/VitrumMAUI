@@ -37,4 +37,47 @@ public class BlurConsumerView : ContentView
         get => (Color)GetValue(TintColorProperty);
         set => SetValue(TintColorProperty, value);
     }
+
+    /// <summary>
+    /// Enables the liquid glass lens/refraction effect on top of the backdrop blur.
+    /// Requires Android 13+ (API 33). On older devices falls back to plain blur.
+    /// </summary>
+    public static readonly BindableProperty LiquidGlassProperty =
+        BindableProperty.Create(nameof(LiquidGlass), typeof(bool), typeof(BlurConsumerView), false);
+
+    /// <inheritdoc cref="LiquidGlassProperty"/>
+    public bool LiquidGlass
+    {
+        get => (bool)GetValue(LiquidGlassProperty);
+        set => SetValue(LiquidGlassProperty, value);
+    }
+
+    /// <summary>
+    /// Corner radius in dp applied to the liquid glass lens shape.
+    /// Use 0 for a flat-edge rectangle, or match the visual corner radius of the view.
+    /// </summary>
+    public static readonly BindableProperty LiquidGlassCornerRadiusProperty =
+        BindableProperty.Create(nameof(LiquidGlassCornerRadius), typeof(float), typeof(BlurConsumerView), 0f);
+
+    /// <inheritdoc cref="LiquidGlassCornerRadiusProperty"/>
+    public float LiquidGlassCornerRadius
+    {
+        get => (float)GetValue(LiquidGlassCornerRadiusProperty);
+        set => SetValue(LiquidGlassCornerRadiusProperty, value);
+    }
+
+    /// <summary>
+    /// When false, blur and liquid glass rendering is skipped entirely.
+    /// The view draws only the tint overlay over a transparent background.
+    /// Use this for the "None" performance mode to avoid GPU capture costs.
+    /// </summary>
+    public static readonly BindableProperty BlurEnabledProperty =
+        BindableProperty.Create(nameof(BlurEnabled), typeof(bool), typeof(BlurConsumerView), true);
+
+    /// <inheritdoc cref="BlurEnabledProperty"/>
+    public bool BlurEnabled
+    {
+        get => (bool)GetValue(BlurEnabledProperty);
+        set => SetValue(BlurEnabledProperty, value);
+    }
 }

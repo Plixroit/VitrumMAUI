@@ -15,6 +15,9 @@ public class BlurConsumerViewHandler : ContentViewHandler
         new PropertyMapper<BlurConsumerView, BlurConsumerViewHandler>(ContentViewHandler.Mapper)
         {
             [nameof(BlurConsumerView.TintColor)] = MapTintColor,
+            [nameof(BlurConsumerView.LiquidGlass)] = MapLiquidGlass,
+            [nameof(BlurConsumerView.LiquidGlassCornerRadius)] = MapLiquidGlass,
+            [nameof(BlurConsumerView.BlurEnabled)] = MapBlurEnabled,
         };
 
     public BlurConsumerViewHandler() : base(Mapper) { }
@@ -66,4 +69,14 @@ public class BlurConsumerViewHandler : ContentViewHandler
 
     static void MapTintColor(BlurConsumerViewHandler handler, BlurConsumerView view)
         => handler.PlatformView.SetTintColor(view.TintColor.ToInt());
+
+    static void MapLiquidGlass(BlurConsumerViewHandler handler, BlurConsumerView view)
+    {
+        float density = handler.Context.Resources!.DisplayMetrics!.Density;
+        float cornerRadiusPx = view.LiquidGlassCornerRadius * density;
+        handler.PlatformView.SetLiquidGlass(view.LiquidGlass, cornerRadiusPx);
+    }
+
+    static void MapBlurEnabled(BlurConsumerViewHandler handler, BlurConsumerView view)
+        => handler.PlatformView.SetBlurEnabled(view.BlurEnabled);
 }

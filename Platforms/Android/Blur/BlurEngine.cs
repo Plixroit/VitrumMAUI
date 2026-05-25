@@ -26,6 +26,7 @@ public class BlurEngine
     readonly List<WeakReference<NativeBlurConsumerView>> _consumers = new();
 
     RenderNode? _blurNode;
+    RenderNode? _rawNode;
     float _lastDensity;
     float _blurRadiusDp = 60f;
     int _captureBackground = 0;
@@ -104,6 +105,26 @@ public class BlurEngine
         node.EndRecording();
     }
 
+    void CaptureRaw(float density)
+    {
+        if (_host.ChildCount == 0) return;
+        var content = _host.GetChildAt(0);
+        if (content == null || content.Width == 0 || content.Height == 0) return;
+
+        int bw = Math.Max(1, (int)(_host.Width / density));
+        int bh = Math.Max(1, (int)(_host.Height / density));
+
+        _rawNode ??= new RenderNode("vitrum_raw");
+        _rawNode.SetPosition(0, 0, bw, bh);
+
+        var rc = _rawNode.BeginRecording(bw, bh);
+        rc.Scale(1f / density, 1f / density);
+        if (_captureBackground != 0)
+            rc.DrawColor(new global::Android.Graphics.Color(_captureBackground));
+        _host.DrawChildInto(rc, content);
+        _rawNode.EndRecording();
+    }
+
     /// <summary>
     /// Called from <see cref="NativeBlurHostView.DispatchDraw"/> on every frame.
     /// Hides consumers, records the background content into the blur RenderNode,
@@ -160,6 +181,52 @@ public class BlurEngine
     /// <summary>Returns the host view's position in the window coordinate space.</summary>
     public void GetHostLocationInWindow(int[] outLoc)
         => _host.GetLocationInWindow(outLoc);
+
+    /// <summary>
+    /// Captures both the blurred and raw background frames for the liquid glass path.
+    /// Call this before <see cref="DrawRawNodeOnto"/> from the consumer's DispatchDraw.
+    /// </summary>
+    public void EnsureCapture(Canvas canvas)
+    {
+        if (!canvas.IsHardwareAccelerated) return;
+        if (Build.VERSION.SdkInt < BuildVersionCodes.S) return;
+        float density = _host.Context!.Resources!.DisplayMetrics!.Density;
+        CaptureLive(density);
+        CaptureRaw(density);
+    }
+
+    /// <summary>
+    /// Draws the raw (unblurred) <c>RenderNode</c> into <paramref name="canvas"/> aligned to
+    /// the consumer's screen position. The blur is applied by the lens node's own
+    /// <c>CreateChainEffect</c> so the lens shader receives blur-then-refract ordering.
+    /// </summary>
+    /// <returns><c>false</c> if the raw node has not been captured yet.</returns>
+    public bool DrawRawNodeOnto(Canvas canvas, int consLeft, int consTop, float density)
+    {
+        if (_rawNode == null) return false;
+        canvas.Save();
+        canvas.Scale(density, density);
+        canvas.Translate(-(consLeft / density), -(consTop / density));
+        canvas.DrawRenderNode(_rawNode);
+        canvas.Restore();
+        return true;
+    }
+
+    /// <summary>
+    /// Draws the cached blur <c>RenderNode</c> into <paramref name="canvas"/> at the correct
+    /// offset so it aligns with the consumer's screen position. No tint or clip is applied.
+    /// </summary>
+    /// <returns><c>false</c> if the blur node has not been captured yet.</returns>
+    public bool DrawBlurNodeOnto(Canvas canvas, int consLeft, int consTop, float density)
+    {
+        if (_blurNode == null) return false;
+        canvas.Save();
+        canvas.Scale(density, density);
+        canvas.Translate(-(consLeft / density), -(consTop / density));
+        canvas.DrawRenderNode(_blurNode);
+        canvas.Restore();
+        return true;
+    }
 
     void InvalidateConsumers()
     {
