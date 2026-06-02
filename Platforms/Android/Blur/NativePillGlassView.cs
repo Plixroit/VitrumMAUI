@@ -71,6 +71,10 @@ half4 main(float2 coord) {
     float radius = radiusAt(centeredCoord, cornerRadii);
 
     float sd = sdRoundedRect(centeredCoord, halfSize, radius);
+
+    // Transparent outside the rounded shape — gives proper curved pill edges.
+    if (sd > 0.0) return half4(0.0);
+
     if (-sd >= refractionHeight) {
         return gradeColor(content.eval(coord));
     }
@@ -135,7 +139,13 @@ half4 main(float2 coord) {
 
     float _cornerRadiusPx;
     int _tintColor;
+    bool _forceGlass = false;
     bool _shaderDirty = true;
+
+    // Motion detection — glass activates only while the pill is moving on screen.
+    int[] _lastWindowLoc = new int[2];
+    int _motionCooldown;
+    const int MotionCooldownFrames = 30;  // ~500 ms at 60 fps
 
     NativeBlurConsumerView? _navBarConsumer;
     global::Android.Views.View? _iconSourceView;
@@ -149,8 +159,11 @@ half4 main(float2 coord) {
         SetWillNotDraw(false);
     }
 
+    public override bool OnTouchEvent(global::Android.Views.MotionEvent? e) => false;
+
     public void SetCornerRadius(float px) { _cornerRadiusPx = px; _shaderDirty = true; Invalidate(); }
     public void SetTintColor(int argb) { _tintColor = argb; Invalidate(); }
+    public void SetForceGlass(bool force) { _forceGlass = force; Invalidate(); }
     public void SetIconSource(global::Android.Views.View? view) { _iconSourceView = view; Invalidate(); }
     public void InvalidateIconCapture() { }
 
@@ -183,7 +196,6 @@ half4 main(float2 coord) {
         if (canvas == null) return;
 
         if (_navBarConsumer != null
-            && _navBarConsumer.GlassLayerNode != null
             && canvas.IsHardwareAccelerated
             && Build.VERSION.SdkInt >= BuildVersionCodes.Tiramisu)
         {
@@ -200,13 +212,28 @@ half4 main(float2 coord) {
     [System.Runtime.Versioning.SupportedOSPlatform("android33.0")]
     void DrawPillGlass(Canvas canvas)
     {
-        var glassNode = _navBarConsumer!.GlassLayerNode;
-        if (glassNode == null || Width == 0 || Height == 0) return;
+        if (Width == 0 || Height == 0) return;
 
-        // Walk the view hierarchy with float GetX/GetY to get sub-pixel accurate offset.
-        // GetLocationInWindow returns integers which causes ±1px quantization jitter every frame;
-        // the lens shader samples up to ~42px away from the edge so that 1px snap becomes
-        // visible tremor. Float positions eliminate the quantization entirely.
+        // Detect motion by comparing the pill's screen position each frame.
+        int[] pillLoc = new int[2];
+        GetLocationInWindow(pillLoc);
+        if (pillLoc[0] != _lastWindowLoc[0] || pillLoc[1] != _lastWindowLoc[1])
+            _motionCooldown = MotionCooldownFrames;
+        else if (_motionCooldown > 0)
+            _motionCooldown--;
+        _lastWindowLoc[0] = pillLoc[0];
+        _lastWindowLoc[1] = pillLoc[1];
+
+        bool isMoving = _motionCooldown > 0 || _forceGlass;
+
+        if (!isMoving)
+        {
+            DrawStaticPill(canvas);
+            return;
+        }
+
+        // Moving: full glass effect.
+        // Float offset walk for sub-pixel accuracy when sampling the panel glass node.
         float offsetX = 0f, offsetY = 0f;
         for (global::Android.Views.View? v = this;
              v != null && v != (global::Android.Views.View)(object)_navBarConsumer;
@@ -216,18 +243,37 @@ half4 main(float2 coord) {
             offsetY += v.GetY();
         }
 
+        _navBarConsumer.SetPillSquishInfo(
+            offsetX + Width  / 2f,
+            offsetY + Height / 2f,
+            Width  / 2f,
+            Height / 2f,
+            _cornerRadiusPx);
+
         EnsureLensEffect();
 
-        // Layer 1: nav bar glass — draw directly to canvas; lens RenderEffect on this view
-        // processes the output without any per-frame intermediate node recording.
-        canvas.Save();
-        canvas.Translate(-offsetX, -offsetY);
-        canvas.DrawRenderNode(glassNode);
-        canvas.Restore();
+        float density = Context!.Resources!.DisplayMetrics!.Density;
+        int[] hostLoc = new int[2];
+        _navBarConsumer.Engine?.GetHostLocationInWindow(hostLoc);
 
-        // Layer 2: icons — drawn fresh every frame so the offset stays in sync with
-        // the animated pill position. Any throttle causes the icon layer to lag behind
-        // by up to N frames, and the lens magnifies that misalignment into visible jitter.
+        // Layer 0: engine blur — everything behind the pill, blurred.
+        var engine = _navBarConsumer.Engine;
+        if (engine != null)
+            engine.DrawBlurNodeOnto(canvas, pillLoc[0] - hostLoc[0], pillLoc[1] - hostLoc[1], density);
+
+        // Layer 1: panel glass at 75% opacity so layer 0 shows through for depth.
+        var glassNode = _navBarConsumer.GlassLayerNode;
+        if (glassNode != null)
+        {
+            canvas.SaveLayerAlpha(0, 0, Width, Height, 190);
+            canvas.Save();
+            canvas.Translate(-offsetX, -offsetY);
+            canvas.DrawRenderNode(glassNode);
+            canvas.Restore();
+            canvas.Restore();
+        }
+
+        // Layer 2: icons drawn fresh each frame so the lens magnifies them correctly.
         if (_iconSourceView != null)
         {
             canvas.Save();
@@ -236,12 +282,58 @@ half4 main(float2 coord) {
             canvas.Restore();
         }
 
-        int tintA = ((_tintColor >> 24) & 0xFF);
+        int tintA = (_tintColor >> 24) & 0xFF;
         if (tintA != 0)
         {
             using var tp = new global::Android.Graphics.Paint(PaintFlags.AntiAlias);
             tp.Color = new global::Android.Graphics.Color(_tintColor);
             canvas.DrawRect(0, 0, Width, Height, tp);
+        }
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("android33.0")]
+    void DrawStaticPill(Canvas canvas)
+    {
+        // Remove lens shader — no glass while still.
+        if (_lensShader != null)
+        {
+            SetRenderEffect(null);
+            _lensShader = null;
+            _shaderDirty = true;
+        }
+
+        // Clip to rounded pill shape.
+        using var path = new global::Android.Graphics.Path();
+        path.AddRoundRect(
+            new global::Android.Graphics.RectF(0, 0, Width, Height),
+            _cornerRadiusPx, _cornerRadiusPx,
+            global::Android.Graphics.Path.Direction.Cw!);
+        canvas.ClipPath(path);
+
+        // Layer 0: solid tint fill (e.g. navy #FF1A2847 = solid navy).
+        if (_tintColor != 0)
+        {
+            using var p = new global::Android.Graphics.Paint(PaintFlags.AntiAlias);
+            p.Color = new global::Android.Graphics.Color(_tintColor);
+            canvas.DrawPaint(p);
+        }
+
+        // Layer 1: draw icon source on top so the active tab icon is visible
+        // through the solid fill — same offset walk as DrawPillGlass.
+        if (_iconSourceView != null)
+        {
+            float offsetX = 0f, offsetY = 0f;
+            for (global::Android.Views.View? v = this;
+                 v != null && v != (global::Android.Views.View?)(object?)_navBarConsumer;
+                 v = v.Parent as global::Android.Views.View)
+            {
+                offsetX += v.GetX();
+                offsetY += v.GetY();
+            }
+            canvas.Save();
+            canvas.Translate(-offsetX, -offsetY);
+            _iconSourceView.Draw(canvas);
+            canvas.Restore();
         }
     }
 
@@ -259,6 +351,7 @@ half4 main(float2 coord) {
 
             float density = Context!.Resources!.DisplayMetrics!.Density;
             float r = _cornerRadiusPx;
+
             _lensShader.SetFloatUniform("size", Width, Height);
             _lensShader.SetFloatUniform("offset", 0f, 0f);
             _lensShader.SetFloatUniform("cornerRadii", r, r, r, r);

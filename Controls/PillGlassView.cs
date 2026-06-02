@@ -14,6 +14,14 @@ public class PillGlassView : View
     public static readonly BindableProperty TintColorProperty =
         BindableProperty.Create(nameof(TintColor), typeof(Color), typeof(PillGlassView), Colors.Transparent);
 
+    /// <summary>
+    /// When true the full glass effect renders every frame even while the pill is stationary.
+    /// Use this when the pill tint colour needs to show through glass (e.g. Jaww navy tint).
+    /// Default false (DChat behaviour: glass only while moving, solid tint when still).
+    /// </summary>
+    public static readonly BindableProperty ForceGlassProperty =
+        BindableProperty.Create(nameof(ForceGlass), typeof(bool), typeof(PillGlassView), false);
+
     public float CornerRadius
     {
         get => (float)GetValue(CornerRadiusProperty);
@@ -24,5 +32,11 @@ public class PillGlassView : View
     {
         get => (Color)GetValue(TintColorProperty);
         set => SetValue(TintColorProperty, value);
+    }
+
+    public bool ForceGlass
+    {
+        get => (bool)GetValue(ForceGlassProperty);
+        set => SetValue(ForceGlassProperty, value);
     }
 }

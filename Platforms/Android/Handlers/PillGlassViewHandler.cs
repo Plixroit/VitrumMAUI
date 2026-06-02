@@ -11,6 +11,7 @@ public class PillGlassViewHandler : ViewHandler<PillGlassView, NativePillGlassVi
         {
             [nameof(PillGlassView.CornerRadius)] = MapCornerRadius,
             [nameof(PillGlassView.TintColor)]    = MapTintColor,
+            [nameof(PillGlassView.ForceGlass)]   = MapForceGlass,
         };
 
     public PillGlassViewHandler() : base(Mapper) { }
@@ -31,7 +32,10 @@ public class PillGlassViewHandler : ViewHandler<PillGlassView, NativePillGlassVi
         base.DisconnectHandler(platformView);
     }
 
-    // VirtualView = PillGlassView, inside Border, inside Grid that also contains the FlexLayout with icons.
+    // VirtualView = PillGlassView, inside Border, inside Grid that also contains the icon container.
+    // Handles two layouts:
+    //   Main nav  — Grid sibling is a FlexLayout (NavContainer)
+    //   Button bar — Grid sibling is a ScrollView whose content holds the buttons
     global::Android.Views.View? FindIconSource()
     {
         var grid = VirtualView?.Parent?.Parent as Microsoft.Maui.Controls.Layout;
@@ -41,6 +45,9 @@ public class PillGlassViewHandler : ViewHandler<PillGlassView, NativePillGlassVi
         {
             if (child is Microsoft.Maui.Controls.FlexLayout fl)
                 return fl.Handler?.PlatformView as global::Android.Views.View;
+
+            if (child is Microsoft.Maui.Controls.ScrollView sv)
+                return sv.Handler?.PlatformView as global::Android.Views.View;
         }
         return null;
     }
@@ -53,4 +60,7 @@ public class PillGlassViewHandler : ViewHandler<PillGlassView, NativePillGlassVi
 
     static void MapTintColor(PillGlassViewHandler h, PillGlassView v)
         => h.PlatformView.SetTintColor(v.TintColor.ToInt());
+
+    static void MapForceGlass(PillGlassViewHandler h, PillGlassView v)
+        => h.PlatformView.SetForceGlass(v.ForceGlass);
 }

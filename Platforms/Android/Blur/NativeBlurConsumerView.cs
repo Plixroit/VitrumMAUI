@@ -1,9 +1,20 @@
 using Android.Content;
 using Android.Graphics;
 using Android.OS;
+using Android.Views;
 using Microsoft.Maui.Platform;
 
 namespace Vitrum.Android;
+
+sealed class RoundedConsumerOutline : ViewOutlineProvider
+{
+    internal float Radius;
+    public override void GetOutline(global::Android.Views.View? view, Outline? outline)
+    {
+        if (view == null || outline == null || view.Width == 0 || view.Height == 0) return;
+        outline.SetRoundRect(0, 0, view.Width, view.Height, Radius);
+    }
+}
 
 /// <summary>
 /// Native Android view that renders the blurred texture produced by <see cref="BlurEngine"/>.
@@ -42,6 +53,11 @@ uniform float chromaticAberration;
 uniform float contrast;
 uniform float whitePoint;
 uniform float chromaMultiplier;
+uniform float2 pillCenter;
+uniform float2 pillHalfSize;
+uniform float pillRadius;
+uniform float squishStrength;
+uniform float squishFalloff;
 
 const half3 rgbToY = half3(0.2126, 0.7152, 0.0722);
 
@@ -94,6 +110,24 @@ half4 main(float2 coord) {
     float radius = radiusAt(centeredCoord, cornerRadii);
 
     float sd = sdRoundedRect(centeredCoord, halfSize, radius);
+
+    // Transparent outside the rounded rect — so the view does not need
+    // ClipToOutline (which would also clip child views like the pill).
+    if (sd > 0.0) return half4(0.0);
+
+    // Pill squish: panel pixels just outside the pill edge sample from a coord
+    // pulled toward the pill center, making content appear pushed away (iOS squish).
+    if (pillHalfSize.x > 0.0) {
+        float2 pillCoord = coord - pillCenter;
+        float pillSd = sdRoundedRect(pillCoord, pillHalfSize, pillRadius);
+        float squishT = step(0.0, pillSd) * (1.0 - smoothstep(0.0, squishFalloff, pillSd));
+        float squishAmt = squishStrength * squishT;
+        if (squishAmt > 0.5) {
+            float2 squishDir = gradSdRoundedRect(pillCoord, pillHalfSize, max(pillRadius, 1.0));
+            coord = coord + squishAmt * squishDir;
+        }
+    }
+
     if (-sd >= refractionHeight) {
         return gradeColor(content.eval(coord));
     }
@@ -155,6 +189,18 @@ half4 main(float2 coord) {
     /// <summary>The blur engine powering this consumer. Used by pill consumers to access raw/blur nodes.</summary>
     public BlurEngine? Engine => _engine;
 
+    // Pill squish state — written by NativePillGlassView each frame, read by EnsureLensNode.
+    float _pillCenterX, _pillCenterY, _pillHalfW, _pillHalfH, _pillRadiusPx;
+
+    public void SetPillSquishInfo(float centerX, float centerY, float halfW, float halfH, float radiusPx)
+    {
+        _pillCenterX = centerX;
+        _pillCenterY = centerY;
+        _pillHalfW   = halfW;
+        _pillHalfH   = halfH;
+        _pillRadiusPx = radiusPx;
+    }
+
     // -----------------------------------------------------------------------
 
     public NativeBlurConsumerView(Context context) : base(context)
@@ -208,6 +254,8 @@ half4 main(float2 coord) {
         }
     }
 
+    RoundedConsumerOutline? _roundedOutline;
+
     /// <summary>
     /// Enables or disables the liquid glass lens effect.
     /// <paramref name="cornerRadiusPx"/> is the corner radius in physical pixels,
@@ -218,6 +266,24 @@ half4 main(float2 coord) {
         _liquidGlass = enabled;
         _cornerRadiusPx = cornerRadiusPx;
         _lensShaderDirty = true;
+
+        if (enabled && cornerRadiusPx > 0f)
+        {
+            _roundedOutline ??= new RoundedConsumerOutline();
+            _roundedOutline.Radius = cornerRadiusPx;
+            OutlineProvider = _roundedOutline;
+        }
+        else
+        {
+            OutlineProvider = ViewOutlineProvider.Background;
+        }
+
+        // The shader outputs transparent pixels outside the rounded rect, so
+        // ClipToOutline is not needed for visual correctness. Leaving it off
+        // allows child views (e.g. the pill) to draw outside the panel bounds.
+        ClipToOutline = false;
+        SetClipChildren(false);
+
         Invalidate();
     }
 
@@ -287,19 +353,31 @@ half4 main(float2 coord) {
         _engine.DrawRawNodeOnto(rc, offsetX, offsetY, density, sx, sy);
         _lensNode.EndRecording();
 
-        // Record lens + tint together into _glassLayerNode so pill consumers can sample
-        // this glass surface as their backdrop (glass-within-glass depth effect).
+        // Record lens + tint into _glassLayerNode extended by a 20dp feather on all sides.
+        // The feather area is filled with background blur so the pill lens shader can refract
+        // into real content beyond the panel edges instead of stretching edge pixels.
+        int fi = (int)(20f * density);
+
         _glassLayerNode ??= new RenderNode("vitrum_glass_layer");
-        _glassLayerNode.SetPosition(0, 0, Width, Height);
-        var glassRc = _glassLayerNode.BeginRecording(Width, Height);
+        _glassLayerNode.SetPosition(-fi, -fi, Width + fi, Height + fi);
+        var glassRc = _glassLayerNode.BeginRecording(Width + 2 * fi, Height + 2 * fi);
+
+        // Feather area: background blur aligned so host px (offsetX-fi, offsetY-fi) = recording (0,0).
+        _engine!.DrawBlurNodeOnto(glassRc, offsetX - fi, offsetY - fi, density);
+
+        // Panel glass: drawn at (fi, fi) inside the recording so panel (0,0) = recording (fi, fi).
+        glassRc.Save();
+        glassRc.Translate(fi, fi);
         glassRc.DrawRenderNode(_lensNode);
         int tintAlpha = ((_tintColor >> 24) & 0xFF);
         if (tintAlpha != 0)
         {
             using var tintPaint = new global::Android.Graphics.Paint(PaintFlags.AntiAlias);
             tintPaint.Color = new global::Android.Graphics.Color(_tintColor);
-            glassRc.DrawRect(0, 0, Width, Height, tintPaint);
+            glassRc.DrawRoundRect(new global::Android.Graphics.RectF(0, 0, Width, Height), _cornerRadiusPx, _cornerRadiusPx, tintPaint);
         }
+        glassRc.Restore();
+
         _glassLayerNode.EndRecording();
 
         canvas.Save();
@@ -343,5 +421,12 @@ half4 main(float2 coord) {
                         RenderEffect.CreateRuntimeShaderEffect(_lensShader, "content"),
                         RenderEffect.CreateBlurEffect(30f, 30f, Shader.TileMode.Clamp!)));
         }
+
+        // Pill squish uniforms — always set since the pill moves every frame.
+        _lensShader.SetFloatUniform("pillCenter",   _pillCenterX, _pillCenterY);
+        _lensShader.SetFloatUniform("pillHalfSize", _pillHalfW,   _pillHalfH);
+        _lensShader.SetFloatUniform("pillRadius",   _pillRadiusPx);
+        _lensShader.SetFloatUniform("squishStrength", 16f * density);
+        _lensShader.SetFloatUniform("squishFalloff",  24f * density);
     }
 }
