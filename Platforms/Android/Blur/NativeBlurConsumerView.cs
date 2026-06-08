@@ -111,10 +111,6 @@ half4 main(float2 coord) {
 
     float sd = sdRoundedRect(centeredCoord, halfSize, radius);
 
-    // Transparent outside the rounded rect — so the view does not need
-    // ClipToOutline (which would also clip child views like the pill).
-    if (sd > 0.0) return half4(0.0);
-
     // Pill squish: panel pixels just outside the pill edge sample from a coord
     // pulled toward the pill center, making content appear pushed away (iOS squish).
     if (pillHalfSize.x > 0.0) {
@@ -381,7 +377,19 @@ half4 main(float2 coord) {
         _glassLayerNode.EndRecording();
 
         canvas.Save();
-        canvas.ClipRect(0, 0, Width, Height);
+        if (_cornerRadiusPx > 0f)
+        {
+            using var glassClip = new global::Android.Graphics.Path();
+            glassClip.AddRoundRect(
+                new global::Android.Graphics.RectF(0, 0, Width, Height),
+                _cornerRadiusPx, _cornerRadiusPx,
+                global::Android.Graphics.Path.Direction.Cw!);
+            canvas.ClipPath(glassClip);
+        }
+        else
+        {
+            canvas.ClipRect(0, 0, Width, Height);
+        }
         canvas.DrawRenderNode(_glassLayerNode);
         canvas.Restore();
     }
@@ -412,14 +420,14 @@ half4 main(float2 coord) {
             _lensShader.SetFloatUniform("whitePoint", 0.08f);
             _lensShader.SetFloatUniform("chromaMultiplier", 1.2f);
 
-            // Chain: raw content -> blur (inner) -> lens shader (outer).
-            // Blur is applied first by the GPU so the shader sees blurred pixels with
-            // intact sharp edges — refraction distortion becomes clearly visible.
-            if (nodeCreated)
-                _lensNode.SetRenderEffect(
-                    RenderEffect.CreateChainEffect(
-                        RenderEffect.CreateRuntimeShaderEffect(_lensShader, "content"),
-                        RenderEffect.CreateBlurEffect(30f, 30f, Shader.TileMode.Clamp!)));
+            // Re-apply the chain effect whenever the recording dimensions change so the
+            // GPU evaluates the shader over the new coordinate space. Applying it only
+            // on nodeCreated causes Android to reuse the cached effect at the old
+            // recording size, making the refraction rim freeze at the pre-animation height.
+            _lensNode.SetRenderEffect(
+                RenderEffect.CreateChainEffect(
+                    RenderEffect.CreateRuntimeShaderEffect(_lensShader, "content"),
+                    RenderEffect.CreateBlurEffect(30f, 30f, Shader.TileMode.Clamp!)));
         }
 
         // Pill squish uniforms — always set since the pill moves every frame.
