@@ -142,6 +142,13 @@ half4 main(float2 coord) {
         }
     }
 
+    // The iOS "swallow" on the bubble: the pill composites its layers minified
+    // about its center, so it shows this much real content from beyond each
+    // edge, squeezed in. The layers (panel glass, icons) extend past the pill
+    // and are composited unblurred, so the compression is clearly visible.
+    // 0 = off.
+    const float PillSwallowDp = 6f;
+
     float _cornerRadiusPx;
     int _tintColor;
     bool _forceGlass = false;
@@ -284,16 +291,30 @@ half4 main(float2 coord) {
         float density = Context!.Resources!.DisplayMetrics!.Density;
         _navBarConsumer.Engine?.GetHostLocationInWindow(_hostLoc);
 
+        // Swallow: composite all layers minified about the pill center so the
+        // bubble shows PillSwallowDp of real content from beyond each edge,
+        // squeezed in (iOS bubble edge compression). Plain canvas transform,
+        // no shader/coordinate remapping. Tint is drawn after the restore.
+        float swPx = PillSwallowDp * density;
+        float swKx = Width  / (Width  + 2f * swPx);
+        float swKy = Height / (Height + 2f * swPx);
+        canvas.Save();
+        canvas.Translate(Width / 2f, Height / 2f);
+        canvas.Scale(swKx, swKy);
+        canvas.Translate(-Width / 2f, -Height / 2f);
+
         // Layer 0: engine blur — everything behind the pill, blurred.
         var engine = _navBarConsumer.Engine;
         if (engine != null)
             engine.DrawBlurNodeOnto(canvas, _pillLoc[0] - _hostLoc[0], _pillLoc[1] - _hostLoc[1], density);
 
         // Layer 1: panel glass at 75% opacity so layer 0 shows through for depth.
+        // The alpha layer rect is expanded by the swallow margin so it still
+        // covers the full pill after the minify transform.
         var glassNode = _navBarConsumer.GlassLayerNode;
         if (glassNode != null)
         {
-            canvas.SaveLayerAlpha(0, 0, Width, Height, 190);
+            canvas.SaveLayerAlpha(-swPx, -swPx, Width + swPx, Height + swPx, 190);
             canvas.Save();
             canvas.Translate(-offsetX, -offsetY);
             canvas.DrawRenderNode(glassNode);
@@ -309,6 +330,8 @@ half4 main(float2 coord) {
             _iconSourceView.Draw(canvas);
             canvas.Restore();
         }
+
+        canvas.Restore();
 
         int tintA = (_tintColor >> 24) & 0xFF;
         if (tintA != 0)

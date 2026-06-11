@@ -114,6 +114,11 @@ half4 main(float2 coord) {
 
     float sd = sdRoundedRect(centeredCoord, halfSize, radius);
 
+    // Transparent outside the rounded shape. Critical when the lens node records
+    // with a margin: without this the margin ring renders full-strength garbage
+    // refraction, which the pill (sampling the glass node unclipped) displays.
+    if (sd > 0.0) return half4(0.0);
+
     // Pill squish: panel pixels just outside the pill edge sample from a coord
     // pulled toward the pill center, making content appear pushed away (iOS squish).
     // pillCenter is in panel coords; offset maps recording coords to panel coords.
