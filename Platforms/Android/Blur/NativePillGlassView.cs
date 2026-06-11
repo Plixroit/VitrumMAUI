@@ -19,6 +19,7 @@ uniform float contrast;
 uniform float whitePoint;
 uniform float chromaMultiplier;
 uniform float highlightStrength;
+uniform float rimWidth;
 
 const half3 rgbToY = half3(0.2126, 0.7152, 0.0722);
 
@@ -86,8 +87,9 @@ half4 main(float2 coord) {
     float2 grad = normalize(gradSdRoundedRect(centeredCoord, halfSize, gradRadius) + depthEffect * normalize(centeredCoord));
 
     float2 refractedCoord = coord + d * grad;
-    float dispersionIntensity = chromaticAberration * ((centeredCoord.x * centeredCoord.y) / (halfSize.x * halfSize.y));
-    float2 dispersedCoord = d * grad * dispersionIntensity;
+    // Disperse along the SDF gradient so the rainbow fringe follows the whole
+    // pill edge (straight runs included), matching the panel shader.
+    float2 dispersedCoord = d * grad * chromaticAberration;
 
     half4 color = half4(0.0);
     half4 red    = content.eval(refractedCoord + dispersedCoord);
@@ -107,14 +109,17 @@ half4 main(float2 coord) {
 
     half4 result = gradeColor(color);
 
-    // Directional glass rim -- light from top-left, shadow on bottom-right.
-    // grad is the outward surface normal (computed above). dot(grad, lightDir)
-    // is 1 at the top-left corner, 0 on right/bottom edges, negative elsewhere.
-    float rimFactor  = 1.0 - smoothstep(0.0, 2.0, -sd);
+    // Glass bevel: SOLID bright band from the boundary to rimWidth with a hard
+    // inner cutoff (1px anti-alias only, no feather) -- iOS edges are sharp.
+    // The pow(4) angular falloff confines it to the top-left and bottom-right
+    // CORNER ARCS only; without it the straight edges glow at 70% and the two
+    // arcs merge into a full outline ring.
+    float bevel      = 1.0 - smoothstep(rimWidth - 1.0, rimWidth, -sd);
     float2 lightDir  = normalize(float2(-0.7, -0.7));
-    float lightDot   = abs(dot(grad, lightDir));
-    float hl         = rimFactor * lightDot * highlightStrength;
-    result.rgb       = mix(result.rgb, half3(1.0, 1.0, 1.0), half(hl * 0.5));
+    float lightDot   = pow(abs(dot(grad, lightDir)), 4.0);
+    float hl         = bevel * lightDot * highlightStrength;
+    half hlH         = half(hl);
+    result.rgb       = min(result.rgb + half3(hlH, hlH, hlH), half3(1.0, 1.0, 1.0));
 
     return result;
 }";
@@ -153,6 +158,11 @@ half4 main(float2 coord) {
     RuntimeShader? _lensShader;
     int _lastWidth, _lastHeight;
     FrameInvalidator? _frameInvalidator;
+
+    // Per-frame scratch buffers and paints (OnDraw runs every frame; avoid GC churn).
+    readonly int[] _pillLoc = new int[2];
+    readonly int[] _hostLoc = new int[2];
+    global::Android.Graphics.Paint? _tintPaint;
 
     public NativePillGlassView(Context context) : base(context)
     {
@@ -215,14 +225,13 @@ half4 main(float2 coord) {
         if (Width == 0 || Height == 0) return;
 
         // Detect motion by comparing the pill's screen position each frame.
-        int[] pillLoc = new int[2];
-        GetLocationInWindow(pillLoc);
-        if (pillLoc[0] != _lastWindowLoc[0] || pillLoc[1] != _lastWindowLoc[1])
+        GetLocationInWindow(_pillLoc);
+        if (_pillLoc[0] != _lastWindowLoc[0] || _pillLoc[1] != _lastWindowLoc[1])
             _motionCooldown = MotionCooldownFrames;
         else if (_motionCooldown > 0)
             _motionCooldown--;
-        _lastWindowLoc[0] = pillLoc[0];
-        _lastWindowLoc[1] = pillLoc[1];
+        _lastWindowLoc[0] = _pillLoc[0];
+        _lastWindowLoc[1] = _pillLoc[1];
 
         bool isMoving = _motionCooldown > 0 || _forceGlass;
 
@@ -243,23 +252,32 @@ half4 main(float2 coord) {
             offsetY += v.GetY();
         }
 
+        // Squish strength follows the motion cooldown: 1 while moving, ramping to 0
+        // over ~500ms once the pill settles, so the panel displacement relaxes back
+        // instead of staying frozen around the resting pill.
         _navBarConsumer.SetPillSquishInfo(
             offsetX + Width  / 2f,
             offsetY + Height / 2f,
             Width  / 2f,
             Height / 2f,
-            _cornerRadiusPx);
+            _cornerRadiusPx,
+            _motionCooldown / (float)MotionCooldownFrames);
+
+        // The panel records the pill shadow and squish uniforms inside its own
+        // DispatchDraw. On HW rendering the pill moving only re-records the pill's
+        // display list, so the panel must be invalidated explicitly each glass frame
+        // or the shadow and squish freeze at the last position the panel drew.
+        _navBarConsumer.PostInvalidateOnAnimation();
 
         EnsureLensEffect();
 
         float density = Context!.Resources!.DisplayMetrics!.Density;
-        int[] hostLoc = new int[2];
-        _navBarConsumer.Engine?.GetHostLocationInWindow(hostLoc);
+        _navBarConsumer.Engine?.GetHostLocationInWindow(_hostLoc);
 
         // Layer 0: engine blur — everything behind the pill, blurred.
         var engine = _navBarConsumer.Engine;
         if (engine != null)
-            engine.DrawBlurNodeOnto(canvas, pillLoc[0] - hostLoc[0], pillLoc[1] - hostLoc[1], density);
+            engine.DrawBlurNodeOnto(canvas, _pillLoc[0] - _hostLoc[0], _pillLoc[1] - _hostLoc[1], density);
 
         // Layer 1: panel glass at 75% opacity so layer 0 shows through for depth.
         var glassNode = _navBarConsumer.GlassLayerNode;
@@ -285,9 +303,9 @@ half4 main(float2 coord) {
         int tintA = (_tintColor >> 24) & 0xFF;
         if (tintA != 0)
         {
-            using var tp = new global::Android.Graphics.Paint(PaintFlags.AntiAlias);
-            tp.Color = new global::Android.Graphics.Color(_tintColor);
-            canvas.DrawRect(0, 0, Width, Height, tp);
+            _tintPaint ??= new global::Android.Graphics.Paint(PaintFlags.AntiAlias);
+            _tintPaint.Color = new global::Android.Graphics.Color(_tintColor);
+            canvas.DrawRect(0, 0, Width, Height, _tintPaint);
         }
     }
 
@@ -355,19 +373,28 @@ half4 main(float2 coord) {
             _lensShader.SetFloatUniform("size", Width, Height);
             _lensShader.SetFloatUniform("offset", 0f, 0f);
             _lensShader.SetFloatUniform("cornerRadii", r, r, r, r);
-            _lensShader.SetFloatUniform("refractionHeight", 10f * density);
-            _lensShader.SetFloatUniform("refractionAmount", -14f * density);
-            _lensShader.SetFloatUniform("depthEffect", 0f);
-            _lensShader.SetFloatUniform("chromaticAberration", 1f);
-            _lensShader.SetFloatUniform("contrast", 0.05f);
-            _lensShader.SetFloatUniform("whitePoint", 0.05f);
-            _lensShader.SetFloatUniform("chromaMultiplier", 1.1f);
-            _lensShader.SetFloatUniform("highlightStrength", 0.8f);
+            // The pill is the most refractive element on screen, but still subtle:
+            // a clear lens, not a fisheye.
+            _lensShader.SetFloatUniform("refractionHeight", 12f * density);
+            _lensShader.SetFloatUniform("refractionAmount", -20f * density);
+            _lensShader.SetFloatUniform("depthEffect", 0.15f);
+            _lensShader.SetFloatUniform("chromaticAberration", 0.15f);
+            // Near-neutral grading: the sampled panel glass is already saturated by
+            // the engine (2x) and graded by the panel shader; grading again here
+            // stacks white-point lifts and washes the pill out.
+            _lensShader.SetFloatUniform("contrast", 0f);
+            _lensShader.SetFloatUniform("whitePoint", 0f);
+            _lensShader.SetFloatUniform("chromaMultiplier", 1f);
+            // rimWidth is in physical px on purpose: a crisp 3px edge line.
+            _lensShader.SetFloatUniform("highlightStrength", 0.45f);
+            _lensShader.SetFloatUniform("rimWidth", 3f);
 
-            // Apply lens as a view-level RenderEffect (set once, reuses same shader object
-            // so uniform updates are picked up automatically each frame with zero recording overhead).
-            if (firstTime)
-                SetRenderEffect(RenderEffect.CreateRuntimeShaderEffect(_lensShader, "content"));
+            // Re-apply the RenderEffect on EVERY size/uniform change, not just once.
+            // Android caches the applied effect at the recording size it was created
+            // for; with a stale effect the shader keeps outputting transparent outside
+            // the OLD rounded rect, so the pill looks frozen at its old size while
+            // the view itself grows (same gotcha as the consumer's lens node).
+            SetRenderEffect(RenderEffect.CreateRuntimeShaderEffect(_lensShader, "content"));
         }
     }
 }

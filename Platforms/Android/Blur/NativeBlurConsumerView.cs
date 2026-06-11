@@ -58,6 +58,8 @@ uniform float2 pillHalfSize;
 uniform float pillRadius;
 uniform float squishStrength;
 uniform float squishFalloff;
+uniform float highlightStrength;
+uniform float rimWidth;
 
 const half3 rgbToY = half3(0.2126, 0.7152, 0.0722);
 
@@ -155,7 +157,21 @@ half4 main(float2 coord) {
     half4 purple = content.eval(refractedCoord - dispersedCoord);
     color.r += purple.r / 7.0;  color.b += purple.b / 3.0;  color.a += purple.a / 7.0;
 
-    return gradeColor(color);
+    half4 result = gradeColor(color);
+
+    // Glass bevel: SOLID bright band from the boundary to rimWidth with a hard
+    // inner cutoff (1px anti-alias only, no feather) -- iOS edges are sharp.
+    // The pow(4) angular falloff confines it to the top-left and bottom-right
+    // CORNER ARCS only; without it the straight edges glow at 70% and the two
+    // arcs merge into a full outline ring.
+    float bevel     = 1.0 - smoothstep(rimWidth - 1.0, rimWidth, -sd);
+    float2 lightDir = normalize(float2(-0.7, -0.7));
+    float lightDot  = pow(abs(dot(grad, lightDir)), 4.0);
+    float hl        = bevel * lightDot * highlightStrength;
+    half hlH        = half(hl);
+    result.rgb      = min(result.rgb + half3(hlH, hlH, hlH), half3(1.0, 1.0, 1.0));
+
+    return result;
 }";
 
     // -----------------------------------------------------------------------
@@ -187,14 +203,17 @@ half4 main(float2 coord) {
 
     // Pill squish state — written by NativePillGlassView each frame, read by EnsureLensNode.
     float _pillCenterX, _pillCenterY, _pillHalfW, _pillHalfH, _pillRadiusPx;
+    float _pillSquishStrength = 1f;
 
-    public void SetPillSquishInfo(float centerX, float centerY, float halfW, float halfH, float radiusPx)
+    public void SetPillSquishInfo(float centerX, float centerY, float halfW, float halfH, float radiusPx,
+                                  float strength = 1f)
     {
         _pillCenterX = centerX;
         _pillCenterY = centerY;
         _pillHalfW   = halfW;
         _pillHalfH   = halfH;
         _pillRadiusPx = radiusPx;
+        _pillSquishStrength = strength;
     }
 
     // -----------------------------------------------------------------------
@@ -419,6 +438,9 @@ half4 main(float2 coord) {
             _lensShader.SetFloatUniform("contrast", 0f);
             _lensShader.SetFloatUniform("whitePoint", 0.08f);
             _lensShader.SetFloatUniform("chromaMultiplier", 1.2f);
+            // rimWidth is in physical px on purpose: a crisp 3px edge line.
+            _lensShader.SetFloatUniform("highlightStrength", 0.4f);
+            _lensShader.SetFloatUniform("rimWidth", 3f);
 
             // Re-apply the chain effect whenever the recording dimensions change so the
             // GPU evaluates the shader over the new coordinate space. Applying it only
@@ -431,10 +453,12 @@ half4 main(float2 coord) {
         }
 
         // Pill squish uniforms — always set since the pill moves every frame.
+        // Strength is scaled by the pill's motion ramp so the displacement
+        // relaxes back to zero after the pill settles instead of staying frozen.
         _lensShader.SetFloatUniform("pillCenter",   _pillCenterX, _pillCenterY);
         _lensShader.SetFloatUniform("pillHalfSize", _pillHalfW,   _pillHalfH);
         _lensShader.SetFloatUniform("pillRadius",   _pillRadiusPx);
-        _lensShader.SetFloatUniform("squishStrength", 16f * density);
+        _lensShader.SetFloatUniform("squishStrength", 10f * density * _pillSquishStrength);
         _lensShader.SetFloatUniform("squishFalloff",  24f * density);
     }
 }
