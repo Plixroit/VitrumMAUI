@@ -405,9 +405,13 @@ half4 main(float2 coord) {
         int tintAlpha = ((_tintColor >> 24) & 0xFF);
         if (tintAlpha != 0)
         {
+            // Tint the FULL recording including the feather, not just the panel
+            // rect. The panel's own draw clips to the panel anyway, but the pill
+            // samples the feather when it overflows or swallows past the panel
+            // edge; untinted feather read as pale fog against the tinted panel.
             using var tintPaint = new global::Android.Graphics.Paint(PaintFlags.AntiAlias);
             tintPaint.Color = new global::Android.Graphics.Color(_tintColor);
-            glassRc.DrawRoundRect(new global::Android.Graphics.RectF(0, 0, Width, Height), _cornerRadiusPx, _cornerRadiusPx, tintPaint);
+            glassRc.DrawRect(-fi, -fi, Width + fi, Height + fi, tintPaint);
         }
         glassRc.Restore();
 

@@ -147,7 +147,7 @@ half4 main(float2 coord) {
     // edge, squeezed in. The layers (panel glass, icons) extend past the pill
     // and are composited unblurred, so the compression is clearly visible.
     // 0 = off.
-    const float PillSwallowDp = 6f;
+    const float PillSwallowDp = 7f;
 
     float _cornerRadiusPx;
     int _tintColor;
@@ -168,6 +168,10 @@ half4 main(float2 coord) {
     global::Android.Views.View? _iconSourceView;
 
     RuntimeShader? _lensShader;
+    // The lens effect lives on this inner node (backdrop layers only), NOT on
+    // the view: iOS never distorts the icons/text, only the glass behind them,
+    // so the icon layer must be drawn above the refraction, untouched.
+    RenderNode? _pillLensNode;
     int _lastWidth, _lastHeight;
     FrameInvalidator? _frameInvalidator;
 
@@ -291,22 +295,28 @@ half4 main(float2 coord) {
         float density = Context!.Resources!.DisplayMetrics!.Density;
         _navBarConsumer.Engine?.GetHostLocationInWindow(_hostLoc);
 
-        // Swallow: composite all layers minified about the pill center so the
+        // Backdrop layers (0+1) are recorded into the inner lens node, which
+        // carries the refraction shader and the swallow minify. The icons are
+        // drawn AFTER the node, directly on the canvas: iOS never distorts the
+        // icons/text, only the glass behind them.
+        _pillLensNode!.SetPosition(0, 0, Width, Height);
+        var prc = _pillLensNode.BeginRecording(Width, Height);
+
+        // Swallow: composite the backdrop minified about the pill center so the
         // bubble shows PillSwallowDp of real content from beyond each edge,
-        // squeezed in (iOS bubble edge compression). Plain canvas transform,
-        // no shader/coordinate remapping. Tint is drawn after the restore.
+        // squeezed in (iOS bubble edge compression).
         float swPx = PillSwallowDp * density;
         float swKx = Width  / (Width  + 2f * swPx);
         float swKy = Height / (Height + 2f * swPx);
-        canvas.Save();
-        canvas.Translate(Width / 2f, Height / 2f);
-        canvas.Scale(swKx, swKy);
-        canvas.Translate(-Width / 2f, -Height / 2f);
+        prc.Save();
+        prc.Translate(Width / 2f, Height / 2f);
+        prc.Scale(swKx, swKy);
+        prc.Translate(-Width / 2f, -Height / 2f);
 
         // Layer 0: engine blur — everything behind the pill, blurred.
         var engine = _navBarConsumer.Engine;
         if (engine != null)
-            engine.DrawBlurNodeOnto(canvas, _pillLoc[0] - _hostLoc[0], _pillLoc[1] - _hostLoc[1], density);
+            engine.DrawBlurNodeOnto(prc, _pillLoc[0] - _hostLoc[0], _pillLoc[1] - _hostLoc[1], density);
 
         // Layer 1: panel glass at 75% opacity so layer 0 shows through for depth.
         // The alpha layer rect is expanded by the swallow margin so it still
@@ -314,41 +324,58 @@ half4 main(float2 coord) {
         var glassNode = _navBarConsumer.GlassLayerNode;
         if (glassNode != null)
         {
-            canvas.SaveLayerAlpha(-swPx, -swPx, Width + swPx, Height + swPx, 190);
-            canvas.Save();
-            canvas.Translate(-offsetX, -offsetY);
-            canvas.DrawRenderNode(glassNode);
-            canvas.Restore();
-            canvas.Restore();
+            prc.SaveLayerAlpha(-swPx, -swPx, Width + swPx, Height + swPx, 190);
+            prc.Save();
+            prc.Translate(-offsetX, -offsetY);
+            prc.DrawRenderNode(glassNode);
+            prc.Restore();
+            prc.Restore();
         }
 
-        // Layer 2: icons drawn fresh each frame so the lens magnifies them correctly.
+        prc.Restore();
+
+        // Layer 2: icons INSIDE the lens node (so the refraction still bends
+        // them at the bubble edges) but OUTSIDE the swallow transform above:
+        // iOS refracts the icons yet never squishes them.
         if (_iconSourceView != null)
         {
-            canvas.Save();
-            canvas.Translate(-offsetX, -offsetY);
-            _iconSourceView.Draw(canvas);
-            canvas.Restore();
+            prc.Save();
+            prc.Translate(-offsetX, -offsetY);
+            _iconSourceView.Draw(prc);
+            prc.Restore();
         }
 
-        canvas.Restore();
+        _pillLensNode.EndRecording();
 
+        // Refracted composite; the shader outputs transparent outside the capsule.
+        canvas.DrawRenderNode(_pillLensNode);
+
+        // Tint on top, clipped to the capsule shape (it is drawn outside the
+        // lens node, which used to shape it via the shader).
         int tintA = (_tintColor >> 24) & 0xFF;
         if (tintA != 0)
         {
+            using var capsule = new global::Android.Graphics.Path();
+            capsule.AddRoundRect(
+                new global::Android.Graphics.RectF(0, 0, Width, Height),
+                _cornerRadiusPx, _cornerRadiusPx,
+                global::Android.Graphics.Path.Direction.Cw!);
+            canvas.Save();
+            canvas.ClipPath(capsule);
             _tintPaint ??= new global::Android.Graphics.Paint(PaintFlags.AntiAlias);
             _tintPaint.Color = new global::Android.Graphics.Color(_tintColor);
             canvas.DrawRect(0, 0, Width, Height, _tintPaint);
+            canvas.Restore();
         }
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("android33.0")]
     void DrawStaticPill(Canvas canvas)
     {
-        // Remove lens shader — no glass while still.
+        // Drop the lens shader while still; EnsureLensEffect recreates it and
+        // re-applies the effect to the inner backdrop node on the next glass frame.
         if (_lensShader != null)
         {
-            SetRenderEffect(null);
             _lensShader = null;
             _shaderDirty = true;
         }
@@ -452,7 +479,9 @@ half4 main(float2 coord) {
             // for; with a stale effect the shader keeps outputting transparent outside
             // the OLD rounded rect, so the pill looks frozen at its old size while
             // the view itself grows (same gotcha as the consumer's lens node).
-            SetRenderEffect(RenderEffect.CreateRuntimeShaderEffect(_lensShader, "content"));
+            // Applied to the inner backdrop node, NOT the view, so icons stay crisp.
+            _pillLensNode ??= new RenderNode("vitrum_pill_lens");
+            _pillLensNode.SetRenderEffect(RenderEffect.CreateRuntimeShaderEffect(_lensShader, "content"));
         }
     }
 }
