@@ -146,11 +146,16 @@ half4 main(float2 coord) {
     int _tintColor;
     bool _forceGlass = false;
     bool _shaderDirty = true;
+    // One-shot guard: the panel squish is zeroed exactly once when the glass
+    // pops to flat, so no displacement freezes around the resting pill.
+    bool _squishCleared = true;
 
     // Motion detection — glass activates only while the pill is moving on screen.
     int[] _lastWindowLoc = new int[2];
     int _motionCooldown;
-    const int MotionCooldownFrames = 30;  // ~500 ms at 60 fps
+    // Short cooldown: after the finger lifts and the snap settles, the glass pops
+    // back to the flat tint pill almost immediately (iOS vanishes the bubble fast).
+    const int MotionCooldownFrames = 8;   // ~130 ms at 60 fps
 
     NativeBlurConsumerView? _navBarConsumer;
     global::Android.Views.View? _iconSourceView;
@@ -235,13 +240,16 @@ half4 main(float2 coord) {
         _lastWindowLoc[0] = _pillLoc[0];
         _lastWindowLoc[1] = _pillLoc[1];
 
-        bool isMoving = _motionCooldown > 0 || _forceGlass;
-
-        if (!isMoving)
+        // Glass is purely press-driven: ForceGlass on = glass, off = flat on the
+        // very next frame (iOS kills the bubble instantly on release; motion alone
+        // never shows glass, so tap-snaps slide flat like iOS). The cooldown above
+        // only drives the squish relax ramp while the glass is held.
+        if (!_forceGlass)
         {
             DrawStaticPill(canvas);
             return;
         }
+        _squishCleared = false;
 
         // Moving: full glass effect.
         // Float offset walk for sub-pixel accuracy when sampling the panel glass node.
@@ -320,6 +328,15 @@ half4 main(float2 coord) {
             SetRenderEffect(null);
             _lensShader = null;
             _shaderDirty = true;
+        }
+
+        // Glass just popped to flat: zero the panel squish immediately or the
+        // displacement field freezes mid-deformation around the resting pill.
+        if (!_squishCleared && _navBarConsumer != null)
+        {
+            _squishCleared = true;
+            _navBarConsumer.SetPillSquishInfo(0f, 0f, 0f, 0f, 0f, 0f);
+            _navBarConsumer.PostInvalidateOnAnimation();
         }
 
         // Clip to rounded pill shape.
