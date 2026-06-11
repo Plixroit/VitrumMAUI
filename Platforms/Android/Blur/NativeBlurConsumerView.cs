@@ -466,7 +466,7 @@ half4 main(float2 coord) {
             _lensShader.SetFloatUniform("whitePoint", 0.08f);
             _lensShader.SetFloatUniform("chromaMultiplier", 1.2f);
             // rimWidth is in physical px on purpose: a crisp 3px edge line.
-            _lensShader.SetFloatUniform("highlightStrength", 0.45f);
+            _lensShader.SetFloatUniform("highlightStrength", 0.65f);
             _lensShader.SetFloatUniform("rimWidth", 3f);
 
             // Pill squish: strength is scaled by the pill's motion ramp so the
