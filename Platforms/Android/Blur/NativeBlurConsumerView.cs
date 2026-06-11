@@ -60,6 +60,7 @@ uniform float squishStrength;
 uniform float squishFalloff;
 uniform float highlightStrength;
 uniform float rimWidth;
+uniform float2 lightDir;
 
 const half3 rgbToY = half3(0.2126, 0.7152, 0.0722);
 
@@ -165,7 +166,6 @@ half4 main(float2 coord) {
     // CORNER ARCS only; without it the straight edges glow at 70% and the two
     // arcs merge into a full outline ring.
     float bevel     = 1.0 - smoothstep(rimWidth - 1.0, rimWidth, -sd);
-    float2 lightDir = normalize(float2(-0.7, -0.7));
     float lightDot  = pow(abs(dot(grad, lightDir)), 4.0);
     float hl        = bevel * lightDot * highlightStrength;
     half hlH        = half(hl);
@@ -232,9 +232,18 @@ half4 main(float2 coord) {
     // rather than via the MAUI handler ConnectHandler path.
     bool _engineFromNativeWalk;
 
+    EventHandler? _lightChangedHandler;
+
     protected override void OnAttachedToWindow()
     {
         base.OnAttachedToWindow();
+
+        // Tilt-driven rim: redraw when the light axis moves so the highlight
+        // tracks the device orientation even while the panel is otherwise idle.
+        GlassLightSensor.Acquire(Context!);
+        _lightChangedHandler ??= (s, e) => PostInvalidateOnAnimation();
+        GlassLightSensor.Updated += _lightChangedHandler;
+
         if (_engine != null) return;
 
         // MAUI ConnectHandler fired before this view was in the element tree so
@@ -261,6 +270,9 @@ half4 main(float2 coord) {
     protected override void OnDetachedFromWindow()
     {
         base.OnDetachedFromWindow();
+        if (_lightChangedHandler != null)
+            GlassLightSensor.Updated -= _lightChangedHandler;
+        GlassLightSensor.Release();
         if (_engineFromNativeWalk && _engine != null)
         {
             _engine.UnregisterConsumer(this);
@@ -413,6 +425,8 @@ half4 main(float2 coord) {
         canvas.Restore();
     }
 
+    float _lastLightX, _lastLightY;
+
     [System.Runtime.Versioning.SupportedOSPlatform("android33.0")]
     void EnsureLensNode(int width, int height, float density)
     {
@@ -421,11 +435,24 @@ half4 main(float2 coord) {
         _lensShader ??= new RuntimeShader(LensShaderSource);
         _lensNode ??= new RenderNode("vitrum_lens");
 
-        if (nodeCreated || width != _lensNodeWidth || height != _lensNodeHeight || _lensShaderDirty)
+        // CRITICAL: RenderEffect snapshots the shader's uniform values at
+        // SetRenderEffect time; uniform writes after that are IGNORED until the
+        // effect is re-applied. So all uniforms (including the per-frame dynamic
+        // ones) must be set BEFORE SetRenderEffect, and the effect must be
+        // re-applied whenever any dynamic uniform changed: size, tilt light
+        // axis, or the pill squish (which moves every frame during a drag).
+        float lx = GlassLightSensor.LightX, ly = GlassLightSensor.LightY;
+        bool lightChanged = lx != _lastLightX || ly != _lastLightY;
+        bool squishActive = _pillHalfW > 0f && _pillSquishStrength > 0.001f;
+
+        if (nodeCreated || width != _lensNodeWidth || height != _lensNodeHeight || _lensShaderDirty
+            || lightChanged || squishActive)
         {
             _lensNodeWidth = width;
             _lensNodeHeight = height;
             _lensShaderDirty = false;
+            _lastLightX = lx;
+            _lastLightY = ly;
 
             float r = _cornerRadiusPx;
             _lensShader.SetFloatUniform("size", width, height);
@@ -439,26 +466,24 @@ half4 main(float2 coord) {
             _lensShader.SetFloatUniform("whitePoint", 0.08f);
             _lensShader.SetFloatUniform("chromaMultiplier", 1.2f);
             // rimWidth is in physical px on purpose: a crisp 3px edge line.
-            _lensShader.SetFloatUniform("highlightStrength", 0.4f);
+            _lensShader.SetFloatUniform("highlightStrength", 0.45f);
             _lensShader.SetFloatUniform("rimWidth", 3f);
 
-            // Re-apply the chain effect whenever the recording dimensions change so the
-            // GPU evaluates the shader over the new coordinate space. Applying it only
-            // on nodeCreated causes Android to reuse the cached effect at the old
-            // recording size, making the refraction rim freeze at the pre-animation height.
+            // Pill squish: strength is scaled by the pill's motion ramp so the
+            // displacement relaxes to zero after the pill settles.
+            _lensShader.SetFloatUniform("pillCenter",   _pillCenterX, _pillCenterY);
+            _lensShader.SetFloatUniform("pillHalfSize", _pillHalfW,   _pillHalfH);
+            _lensShader.SetFloatUniform("pillRadius",   _pillRadiusPx);
+            _lensShader.SetFloatUniform("squishStrength", 10f * density * _pillSquishStrength);
+            _lensShader.SetFloatUniform("squishFalloff",  24f * density);
+
+            // World-anchored light axis from the device tilt sensor.
+            _lensShader.SetFloatUniform("lightDir", lx, ly);
+
             _lensNode.SetRenderEffect(
                 RenderEffect.CreateChainEffect(
                     RenderEffect.CreateRuntimeShaderEffect(_lensShader, "content"),
                     RenderEffect.CreateBlurEffect(30f, 30f, Shader.TileMode.Clamp!)));
         }
-
-        // Pill squish uniforms — always set since the pill moves every frame.
-        // Strength is scaled by the pill's motion ramp so the displacement
-        // relaxes back to zero after the pill settles instead of staying frozen.
-        _lensShader.SetFloatUniform("pillCenter",   _pillCenterX, _pillCenterY);
-        _lensShader.SetFloatUniform("pillHalfSize", _pillHalfW,   _pillHalfH);
-        _lensShader.SetFloatUniform("pillRadius",   _pillRadiusPx);
-        _lensShader.SetFloatUniform("squishStrength", 10f * density * _pillSquishStrength);
-        _lensShader.SetFloatUniform("squishFalloff",  24f * density);
     }
 }

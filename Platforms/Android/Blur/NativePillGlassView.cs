@@ -20,6 +20,7 @@ uniform float whitePoint;
 uniform float chromaMultiplier;
 uniform float highlightStrength;
 uniform float rimWidth;
+uniform float2 lightDir;
 
 const half3 rgbToY = half3(0.2126, 0.7152, 0.0722);
 
@@ -115,7 +116,6 @@ half4 main(float2 coord) {
     // CORNER ARCS only; without it the straight edges glow at 70% and the two
     // arcs merge into a full outline ring.
     float bevel      = 1.0 - smoothstep(rimWidth - 1.0, rimWidth, -sd);
-    float2 lightDir  = normalize(float2(-0.7, -0.7));
     float lightDot   = pow(abs(dot(grad, lightDir)), 4.0);
     float hl         = bevel * lightDot * highlightStrength;
     half hlH         = half(hl);
@@ -180,6 +180,7 @@ half4 main(float2 coord) {
     protected override void OnAttachedToWindow()
     {
         base.OnAttachedToWindow();
+        GlassLightSensor.Acquire(Context!);
         FindNavBarConsumer();
         _frameInvalidator ??= new FrameInvalidator(this);
         PostOnAnimation(_frameInvalidator);
@@ -188,6 +189,7 @@ half4 main(float2 coord) {
     protected override void OnDetachedFromWindow()
     {
         base.OnDetachedFromWindow();
+        GlassLightSensor.Release();
         _navBarConsumer = null;
     }
 
@@ -355,17 +357,29 @@ half4 main(float2 coord) {
         }
     }
 
+    float _lastLightX, _lastLightY;
+
     [System.Runtime.Versioning.SupportedOSPlatform("android33.0")]
     void EnsureLensEffect()
     {
         bool firstTime = _lensShader == null;
         _lensShader ??= new RuntimeShader(LensShaderSource);
 
-        if (firstTime || Width != _lastWidth || Height != _lastHeight || _shaderDirty)
+        // CRITICAL: RenderEffect snapshots the shader's uniform values at
+        // SetRenderEffect time; uniform writes after that are IGNORED until the
+        // effect is re-applied. All uniforms must be set BEFORE SetRenderEffect,
+        // and the effect must be re-applied when the tilt light axis changes or
+        // the rim freezes at the last applied direction.
+        float lx = GlassLightSensor.LightX, ly = GlassLightSensor.LightY;
+        bool lightChanged = lx != _lastLightX || ly != _lastLightY;
+
+        if (firstTime || Width != _lastWidth || Height != _lastHeight || _shaderDirty || lightChanged)
         {
             _lastWidth = Width;
             _lastHeight = Height;
             _shaderDirty = false;
+            _lastLightX = lx;
+            _lastLightY = ly;
 
             float density = Context!.Resources!.DisplayMetrics!.Density;
             float r = _cornerRadiusPx;
@@ -386,8 +400,12 @@ half4 main(float2 coord) {
             _lensShader.SetFloatUniform("whitePoint", 0f);
             _lensShader.SetFloatUniform("chromaMultiplier", 1f);
             // rimWidth is in physical px on purpose: a crisp 3px edge line.
-            _lensShader.SetFloatUniform("highlightStrength", 0.45f);
+            _lensShader.SetFloatUniform("highlightStrength", 0.35f);
             _lensShader.SetFloatUniform("rimWidth", 3f);
+
+            // World-anchored light axis from the device tilt sensor; set before
+            // the effect is applied so the snapshot carries the live direction.
+            _lensShader.SetFloatUniform("lightDir", lx, ly);
 
             // Re-apply the RenderEffect on EVERY size/uniform change, not just once.
             // Android caches the applied effect at the recording size it was created
