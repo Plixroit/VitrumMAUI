@@ -116,8 +116,9 @@ half4 main(float2 coord) {
 
     // Pill squish: panel pixels just outside the pill edge sample from a coord
     // pulled toward the pill center, making content appear pushed away (iOS squish).
+    // pillCenter is in panel coords; offset maps recording coords to panel coords.
     if (pillHalfSize.x > 0.0) {
-        float2 pillCoord = coord - pillCenter;
+        float2 pillCoord = (coord + offset) - pillCenter;
         float pillSd = sdRoundedRect(pillCoord, pillHalfSize, pillRadius);
         float squishT = step(0.0, pillSd) * (1.0 - smoothstep(0.0, squishFalloff, pillSd));
         float squishAmt = squishStrength * squishT;

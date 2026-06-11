@@ -44,6 +44,10 @@ public class BlurEngine
         InvalidateConsumers();
     }
 
+    /// <summary>The capture background fill color; used by consumers that record
+    /// beyond the host bounds so off-host areas match instead of going transparent.</summary>
+    public int CaptureBackgroundColor => _captureBackground;
+
     /// <summary>Updates the blur radius (in dp) and invalidates the cached RenderNode.</summary>
     public void SetBlurRadius(float dp)
     {
